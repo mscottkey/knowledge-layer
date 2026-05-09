@@ -2,11 +2,13 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import health, ingest, serve, review
 from graph.client import get_driver, close_driver
 from graph.schema import ensure_schema
 from vector.client import get_pool, close_pool, ensure_vector_table
+from core.supabase import get_supabase_pool, close_supabase_pool
 from core.logging import setup_logging, get_logger
 from core.config import get_settings
 
@@ -23,11 +25,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         extra={"environment": settings.ENVIRONMENT},
     )
 
+    # Initialize connections
     await get_driver()
     await ensure_schema()
 
     await get_pool()
     await ensure_vector_table()
+
+    await get_supabase_pool()
 
     logger.info("All connections established")
 
@@ -36,6 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Shutting down KnowledgeLayer API")
     await close_driver()
     await close_pool()
+    await close_supabase_pool()
 
 
 app = FastAPI(
@@ -43,6 +49,15 @@ app = FastAPI(
     description="AI-native knowledge graph platform",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(health.router)

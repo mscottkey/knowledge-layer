@@ -1,0 +1,5 @@
+[project]
+name = "knowledgelayer"
+
+[db]
+# Migrations are in supabase/migrations/

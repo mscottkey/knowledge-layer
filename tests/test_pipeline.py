@@ -44,11 +44,14 @@ class TestExtractor:
 class TestEmbedder:
     @pytest.mark.asyncio
     async def test_embed_returns_vector(self):
+        from core.config import get_settings
+        settings = get_settings()
+
         text = "This is a test sentence"
         embedding = await embed(text)
 
         assert isinstance(embedding, list)
-        assert len(embedding) == 3072
+        assert len(embedding) == settings.EMBEDDING_DIMENSION
         assert all(isinstance(x, float) for x in embedding)
 
     @pytest.mark.asyncio

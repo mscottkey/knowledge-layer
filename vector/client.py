@@ -45,31 +45,30 @@ async def close_pool() -> None:
 
 
 async def ensure_vector_table() -> None:
+    """Verify the embeddings table exists. Table should be created via migrations."""
     settings = get_settings()
 
     if settings.use_mocks:
-        logger.info("Skipping vector table creation for mock store")
+        logger.info("Skipping vector table check for mock store")
         return
 
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        await conn.execute("""
-            CREATE EXTENSION IF NOT EXISTS vector;
-
-            CREATE TABLE IF NOT EXISTS embeddings (
-                id TEXT PRIMARY KEY,
-                tenant_id TEXT NOT NULL,
-                embedding vector(3072),
-                metadata JSONB DEFAULT '{}',
-                created_at TIMESTAMPTZ DEFAULT NOW()
+        exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_name = 'embeddings'
             );
-
-            CREATE INDEX IF NOT EXISTS idx_embeddings_tenant
-            ON embeddings (tenant_id);
         """)
 
-    logger.info("Vector table created/verified")
+        if not exists:
+            logger.warning(
+                "Embeddings table not found. Run migrations: "
+                "supabase db push or apply supabase/migrations/*.sql"
+            )
+        else:
+            logger.info("Vector table verified")
 
 
 def get_mock_store() -> MockVectorStore | None:

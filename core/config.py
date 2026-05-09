@@ -20,11 +20,13 @@ class Settings(BaseSettings):
     DATABASE_URL: str = ""
 
     OPENAI_API_KEY: str = ""
+    GEMINI_API_KEY: str = ""
     REDIS_URL: str = "redis://localhost:6379"
 
     CONFIDENCE_THRESHOLD: float = 0.80
-    EMBEDDING_MODEL: str = "text-embedding-3-large"
-    SYNTHESIS_MODEL: str = "gpt-4o"
+    EMBEDDING_MODEL: str = "text-embedding-004"
+    EMBEDDING_DIMENSION: int = 768
+    SYNTHESIS_MODEL: str = "gemini-2.5-flash"
 
     LOG_LEVEL: str = "INFO"
     ENVIRONMENT: str = "development"

@@ -1,22 +1,25 @@
 import hashlib
+import time
 from functools import lru_cache
+from uuid import UUID
 
 import numpy as np
-from openai import AsyncOpenAI
+from google import genai
 
 from core.config import get_settings
 from core.logging import get_logger
+from core.usage import log_ai_usage
 
 logger = get_logger("pipeline.embedder")
 
-_client: AsyncOpenAI | None = None
+_client: genai.Client | None = None
 
 
-def _get_client() -> AsyncOpenAI:
+def _get_client() -> genai.Client:
     global _client
     if _client is None:
         settings = get_settings()
-        _client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        _client = genai.Client(api_key=settings.GEMINI_API_KEY)
     return _client
 
 
@@ -24,32 +27,126 @@ def _text_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token."""
+    return len(text) // 4
+
+
 @lru_cache(maxsize=1000)
-def _cached_mock_embedding(text_hash: str) -> tuple[float, ...]:
+def _cached_mock_embedding(text_hash: str, dimension: int) -> tuple[float, ...]:
     hash_bytes = bytes.fromhex(text_hash)
-
     np.random.seed(int.from_bytes(hash_bytes[:4], "big"))
-    embedding = np.random.randn(3072)
+    embedding = np.random.randn(dimension)
     embedding = embedding / np.linalg.norm(embedding)
-
     return tuple(embedding.tolist())
 
 
-async def embed(text: str) -> list[float]:
+async def embed(
+    text: str,
+    tenant_id: UUID | None = None,
+    user_id: UUID | None = None,
+) -> list[float]:
+    """Generate embedding for text, with optional usage logging."""
     settings = get_settings()
 
     if settings.use_mocks:
         text_h = _text_hash(text)
-        return list(_cached_mock_embedding(text_h))
+        embedding = list(_cached_mock_embedding(text_h, settings.EMBEDDING_DIMENSION))
+
+        # Still log mock usage if tenant provided
+        if tenant_id:
+            await log_ai_usage(
+                tenant_id=tenant_id,
+                model_name=settings.EMBEDDING_MODEL,
+                model_provider="google",
+                feature_context="embedding",
+                prompt_tokens=_estimate_tokens(text),
+                completion_tokens=0,
+                user_id=user_id,
+            )
+
+        return embedding
 
     client = _get_client()
+    start_time = time.time()
 
-    response = await client.embeddings.create(
+    response = await client.aio.models.embed_content(
         model=settings.EMBEDDING_MODEL,
-        input=text,
+        contents=text,
     )
 
-    return response.data[0].embedding
+    latency_ms = int((time.time() - start_time) * 1000)
+    embedding = list(response.embeddings[0].values)
+
+    # Log usage if tenant provided
+    if tenant_id:
+        await log_ai_usage(
+            tenant_id=tenant_id,
+            model_name=settings.EMBEDDING_MODEL,
+            model_provider="google",
+            feature_context="embedding",
+            prompt_tokens=_estimate_tokens(text),
+            completion_tokens=0,
+            user_id=user_id,
+            latency_ms=latency_ms,
+        )
+
+    return embedding
+
+
+async def embed_batch(
+    texts: list[str],
+    tenant_id: UUID | None = None,
+    user_id: UUID | None = None,
+) -> list[list[float]]:
+    """Generate embeddings for multiple texts."""
+    settings = get_settings()
+
+    if settings.use_mocks:
+        embeddings = []
+        for text in texts:
+            text_h = _text_hash(text)
+            embeddings.append(list(_cached_mock_embedding(text_h, settings.EMBEDDING_DIMENSION)))
+
+        if tenant_id:
+            total_tokens = sum(_estimate_tokens(t) for t in texts)
+            await log_ai_usage(
+                tenant_id=tenant_id,
+                model_name=settings.EMBEDDING_MODEL,
+                model_provider="google",
+                feature_context="embedding_batch",
+                prompt_tokens=total_tokens,
+                completion_tokens=0,
+                user_id=user_id,
+            )
+
+        return embeddings
+
+    client = _get_client()
+    start_time = time.time()
+
+    response = await client.aio.models.embed_content(
+        model=settings.EMBEDDING_MODEL,
+        contents=texts,
+    )
+
+    latency_ms = int((time.time() - start_time) * 1000)
+    embeddings = [list(e.values) for e in response.embeddings]
+
+    if tenant_id:
+        total_tokens = sum(_estimate_tokens(t) for t in texts)
+        await log_ai_usage(
+            tenant_id=tenant_id,
+            model_name=settings.EMBEDDING_MODEL,
+            model_provider="google",
+            feature_context="embedding_batch",
+            prompt_tokens=total_tokens,
+            completion_tokens=0,
+            user_id=user_id,
+            latency_ms=latency_ms,
+        )
+
+    return embeddings
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:

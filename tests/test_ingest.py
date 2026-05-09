@@ -3,6 +3,9 @@ from httpx import AsyncClient, ASGITransport
 
 from api.main import app
 
+# Use a valid UUID for testing
+TEST_TENANT_ID = "12345678-1234-5678-1234-567812345678"
+
 
 @pytest.fixture
 async def client():
@@ -24,7 +27,7 @@ class TestIngestEndpoint:
     @pytest.mark.asyncio
     async def test_ingest_ticket(self, client):
         payload = {
-            "tenant_id": "test-tenant",
+            "tenant_id": TEST_TENANT_ID,
             "ticket_id": "123",
             "subject": "Dashboard not loading",
             "description": "The Analytics Dashboard is not loading for some users",
@@ -42,7 +45,7 @@ class TestIngestEndpoint:
     @pytest.mark.asyncio
     async def test_ingest_slack(self, client):
         payload = {
-            "tenant_id": "test-tenant",
+            "tenant_id": TEST_TENANT_ID,
             "team_id": "T123",
             "event": {
                 "ts": "1234567890.123456",
@@ -61,7 +64,7 @@ class TestIngestEndpoint:
     @pytest.mark.asyncio
     async def test_ingest_pr(self, client):
         payload = {
-            "tenant_id": "test-tenant",
+            "tenant_id": TEST_TENANT_ID,
             "pull_request": {
                 "number": 456,
                 "title": "Fix authentication bug",
@@ -81,7 +84,7 @@ class TestIngestEndpoint:
     @pytest.mark.asyncio
     async def test_ingest_empty_text_fails(self, client):
         payload = {
-            "tenant_id": "test-tenant",
+            "tenant_id": TEST_TENANT_ID,
             "ticket_id": "123",
             "subject": "",
             "description": "",
@@ -96,7 +99,7 @@ class TestProcessEndpoint:
     @pytest.mark.asyncio
     async def test_process_signal_sync(self, client):
         payload = {
-            "tenant_id": "test-tenant",
+            "tenant_id": TEST_TENANT_ID,
             "source_id": "doc-1",
             "raw_text": "The Dashboard feature allows users to view Analytics reports",
         }
@@ -116,7 +119,7 @@ class TestContextEndpoint:
     async def test_context_retrieval_empty(self, client):
         response = await client.get(
             "/context",
-            params={"query": "test query", "tenant_id": "test-tenant"},
+            params={"query": "test query", "tenant_id": TEST_TENANT_ID},
         )
 
         assert response.status_code == 200
@@ -127,7 +130,7 @@ class TestContextEndpoint:
     @pytest.mark.asyncio
     async def test_context_retrieval_after_ingest(self, client):
         ingest_payload = {
-            "tenant_id": "test-tenant",
+            "tenant_id": TEST_TENANT_ID,
             "source_id": "doc-1",
             "raw_text": "The Dashboard feature provides real-time Analytics and reporting capabilities",
         }
@@ -135,7 +138,7 @@ class TestContextEndpoint:
 
         response = await client.get(
             "/context",
-            params={"query": "Dashboard Analytics", "tenant_id": "test-tenant"},
+            params={"query": "Dashboard Analytics", "tenant_id": TEST_TENANT_ID},
         )
 
         assert response.status_code == 200
@@ -148,7 +151,7 @@ class TestReviewEndpoint:
     async def test_review_queue_empty(self, client):
         response = await client.get(
             "/review/queue",
-            params={"tenant_id": "test-tenant"},
+            params={"tenant_id": TEST_TENANT_ID},
         )
 
         assert response.status_code == 200
@@ -160,7 +163,7 @@ class TestReviewEndpoint:
     async def test_approve_nonexistent_article(self, client):
         response = await client.post(
             "/review/nonexistent-id/approve",
-            params={"tenant_id": "test-tenant"},
+            params={"tenant_id": TEST_TENANT_ID},
             json={"reviewer_id": "reviewer-1"},
         )
 

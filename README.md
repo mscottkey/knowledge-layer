@@ -9,7 +9,8 @@ AI-native knowledge graph platform that ingests signals from support tools (tick
 | API | Python 3.12, FastAPI, uvicorn |
 | Graph Store | Neo4j Aura |
 | Vector + Ops DB | Supabase (PostgreSQL + pgvector) |
-| LLM | OpenAI (text-embedding-3-large, gpt-4o) |
+| Embeddings | Gemini (text-embedding-004) |
+| Synthesis | OpenAI (gpt-4o) |
 | NER | spaCy en_core_web_trf |
 | Job Queue | Redis |
 | Frontend | Next.js 14, Tailwind CSS |
@@ -33,7 +34,8 @@ Edit `.env` with your credentials:
 
 - **Neo4j Aura**: Get URI and credentials from [Neo4j Aura Console](https://console.neo4j.io)
 - **Supabase**: Get URL and key from [Supabase Dashboard](https://supabase.com/dashboard/project/_/settings/api)
-- **OpenAI**: Get API key from [OpenAI Platform](https://platform.openai.com/api-keys)
+- **Gemini**: Get API key from [Google AI Studio](https://aistudio.google.com/apikey)
+- **OpenAI**: Get API key from [OpenAI Platform](https://platform.openai.com/api-keys) (for synthesis)
 
 For local development without cloud services, set `USE_MOCKS=true`.
 
@@ -51,13 +53,25 @@ python -m spacy download en_core_web_trf
 
 Skip this step if using `USE_MOCKS=true` (keyword fallback extractor will be used).
 
-### 5. Start Redis
+### 5. Run database migrations
+
+Apply the Supabase migrations to create the embeddings table:
+
+```bash
+# Option A: Using Supabase CLI
+supabase db push
+
+# Option B: Run SQL directly in Supabase Dashboard → SQL Editor
+# Copy contents of supabase/migrations/20240101000000_create_embeddings.sql
+```
+
+### 6. Start Redis
 
 ```bash
 docker compose up -d
 ```
 
-### 6. Run the API server
+### 7. Run the API server
 
 ```bash
 uvicorn api.main:app --reload
