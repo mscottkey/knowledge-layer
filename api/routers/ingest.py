@@ -23,7 +23,7 @@ async def get_redis() -> redis.Redis | None:
     global _redis_client
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         return None
 
     if _redis_client is None:
@@ -171,7 +171,7 @@ async def ingest_signal(
 
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         _mock_queue[str(signal.id)] = signal.model_dump(mode="json")
     else:
         redis_client = await get_redis()

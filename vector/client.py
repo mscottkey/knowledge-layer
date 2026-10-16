@@ -20,7 +20,7 @@ async def get_pool() -> asyncpg.Pool | MockVectorStore:
     global _pool, _mock_store
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         if _mock_store is None:
             logger.info("Using mock vector store")
             _mock_store = MockVectorStore()
@@ -48,7 +48,7 @@ async def ensure_vector_table() -> None:
     """Verify the embeddings table exists. Table should be created via migrations."""
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         logger.info("Skipping vector table check for mock store")
         return
 

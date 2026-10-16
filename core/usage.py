@@ -49,7 +49,7 @@ async def log_ai_usage(
 
     cost = calculate_cost_microdollars(model_name, prompt_tokens, completion_tokens)
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         mock_pool = get_mock_pool()
         if mock_pool:
             from uuid import uuid4
@@ -103,7 +103,7 @@ async def get_tenant_usage_this_month(tenant_id: UUID) -> dict:
     """Get tenant's AI usage for the current month."""
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         mock_pool = get_mock_pool()
         if mock_pool:
             total_tokens = sum(

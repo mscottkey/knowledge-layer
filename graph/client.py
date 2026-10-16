@@ -51,7 +51,7 @@ async def get_driver() -> AsyncDriver | MockNeo4jDriver:
     global _driver, _mock_driver
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         if _mock_driver is None:
             logger.info("Using mock Neo4j driver")
             _mock_driver = MockNeo4jDriver()
@@ -89,7 +89,7 @@ async def execute_query(
     driver = await get_driver()
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         return await _execute_mock_query(driver, query, params)
 
     async with driver.session() as session:

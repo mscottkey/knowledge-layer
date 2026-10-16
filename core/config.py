@@ -31,11 +31,29 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     ENVIRONMENT: str = "development"
 
+    # USE_MOCKS=true mocks everything. MOCK_STORES and MOCK_MODELS mock one side only,
+    # for example real Neo4j and Postgres with fake embeddings and synthesis.
     USE_MOCKS: bool = False
+    MOCK_STORES: bool = False
+    MOCK_MODELS: bool = False
+
+    @staticmethod
+    def _env_flag(name: str) -> bool:
+        return os.getenv(name, "").lower() == "true"
 
     @property
     def use_mocks(self) -> bool:
-        return self.USE_MOCKS or os.getenv("USE_MOCKS", "").lower() == "true"
+        return self.USE_MOCKS or self._env_flag("USE_MOCKS")
+
+    @property
+    def mock_stores(self) -> bool:
+        """Neo4j, pgvector, Supabase and Redis are replaced by in-memory fakes."""
+        return self.use_mocks or self.MOCK_STORES or self._env_flag("MOCK_STORES")
+
+    @property
+    def mock_models(self) -> bool:
+        """Embeddings, synthesis and spaCy are replaced by deterministic local stand-ins."""
+        return self.use_mocks or self.MOCK_MODELS or self._env_flag("MOCK_MODELS")
 
 
 @lru_cache

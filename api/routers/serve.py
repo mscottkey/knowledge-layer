@@ -12,6 +12,8 @@ logger = get_logger("api.serve")
 
 router = APIRouter(tags=["serve"])
 
+CANDIDATE_MULTIPLIER = 4
+
 
 class ArticleResult(BaseModel):
     article_id: str
@@ -33,10 +35,12 @@ async def get_context(
 ) -> ContextResponse:
     query_embedding = await embed(query)
 
+    # Vector search knows nothing about review status, so ask for extra candidates and let the
+    # graph keep only published ones. Agents must never see unreviewed or retired content.
     similar_results = await search_similar(
         embedding=query_embedding,
         tenant_id=tenant_id,
-        limit=limit,
+        limit=limit * CANDIDATE_MULTIPLIER,
     )
 
     if not similar_results:
@@ -44,7 +48,7 @@ async def get_context(
 
     article_ids = [r["id"] for r in similar_results]
 
-    articles = await queries.get_articles_by_ids(article_ids, tenant_id)
+    articles = await queries.get_articles_by_ids(article_ids, tenant_id, statuses=["published"])
 
     article_map = {a["id"]: a for a in articles}
 
@@ -59,6 +63,8 @@ async def get_context(
                 confidence=article.get("confidence", 0.0),
                 version=article.get("version", 1),
             ))
+            if len(results) == limit:
+                break
 
     logger.info(
         "Context retrieved",
