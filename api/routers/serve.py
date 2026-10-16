@@ -3,6 +3,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
+from api.deps import ReadAuth
 from pipeline.embedder import embed
 from vector.store import search_similar
 from graph import queries
@@ -29,11 +30,12 @@ class ContextResponse(BaseModel):
 
 @router.get("/context", response_model=ContextResponse)
 async def get_context(
+    auth: ReadAuth,
     query: str = Query(..., min_length=1),
-    tenant_id: str = Query(..., min_length=1),
     limit: int = Query(5, ge=1, le=20),
 ) -> ContextResponse:
-    query_embedding = await embed(query)
+    tenant_id = str(auth.tenant_id)
+    query_embedding = await embed(query, tenant_id=auth.tenant_id)
 
     # Vector search knows nothing about review status, so ask for extra candidates and let the
     # graph keep only published ones. Agents must never see unreviewed or retired content.

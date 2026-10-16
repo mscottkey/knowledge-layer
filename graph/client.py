@@ -81,10 +81,13 @@ async def execute_query(
     params: dict[str, Any],
     tenant_id: str,
 ) -> list[dict[str, Any]]:
-    if "tenant_id" not in params:
-        params["tenant_id"] = tenant_id
+    # The query text itself must filter on the tenant. Checking only the parameters, as this once
+    # did, passes for a query that never uses them.
+    if "$tenant_id" not in query:
+        raise ValueError("Cypher queries must filter on $tenant_id")
 
-    assert params.get("tenant_id") == tenant_id, "tenant_id mismatch in query params"
+    if params.setdefault("tenant_id", tenant_id) != tenant_id:
+        raise ValueError("tenant_id parameter does not match the tenant for this query")
 
     driver = await get_driver()
     settings = get_settings()

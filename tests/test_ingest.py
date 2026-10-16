@@ -3,14 +3,14 @@ from httpx import AsyncClient, ASGITransport
 
 from api.main import app
 
-# Use a valid UUID for testing
-TEST_TENANT_ID = "12345678-1234-5678-1234-567812345678"
+from tests.conftest import TEST_TENANT_ID
 
 
 @pytest.fixture
 async def client():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    # Development mode: no API key, the tenant comes from a header.
+    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-Tenant-ID": TEST_TENANT_ID}) as ac:
         yield ac
 
 
@@ -99,7 +99,6 @@ class TestProcessEndpoint:
     @pytest.mark.asyncio
     async def test_process_signal_sync(self, client):
         payload = {
-            "tenant_id": TEST_TENANT_ID,
             "source_id": "doc-1",
             "raw_text": "The Dashboard feature allows users to view Analytics reports",
         }
@@ -117,10 +116,7 @@ class TestProcessEndpoint:
 class TestContextEndpoint:
     @pytest.mark.asyncio
     async def test_context_retrieval_empty(self, client):
-        response = await client.get(
-            "/context",
-            params={"query": "test query", "tenant_id": TEST_TENANT_ID},
-        )
+        response = await client.get("/context", params={"query": "test query"})
 
         assert response.status_code == 200
         data = response.json()
@@ -128,31 +124,36 @@ class TestContextEndpoint:
         assert isinstance(data["results"], list)
 
     @pytest.mark.asyncio
-    async def test_context_retrieval_after_ingest(self, client):
+    async def test_context_returns_a_published_article_after_ingest(self, client, low_threshold):
         ingest_payload = {
-            "tenant_id": TEST_TENANT_ID,
             "source_id": "doc-1",
             "raw_text": "The Dashboard feature provides real-time Analytics and reporting capabilities",
         }
-        await client.post("/ingest/process/context-test-1", json=ingest_payload)
+        processed = await client.post("/ingest/process/context-test-1", json=ingest_payload)
+        assert processed.json()["status"] == "published"
 
-        response = await client.get(
-            "/context",
-            params={"query": "Dashboard Analytics", "tenant_id": TEST_TENANT_ID},
-        )
+        response = await client.get("/context", params={"query": "Dashboard Analytics"})
 
         assert response.status_code == 200
-        data = response.json()
-        assert "results" in data
+        results = response.json()["results"]
+        assert [r["article_id"] for r in results] == [processed.json()["article_id"]]
+        assert "real-time Analytics" in results[0]["body"]
+
+    @pytest.mark.asyncio
+    async def test_context_hides_an_article_that_is_waiting_for_review(self, client):
+        ingest_payload = {"source_id": "doc-1", "raw_text": "The Dashboard feature provides Analytics"}
+        processed = await client.post("/ingest/process/context-test-2", json=ingest_payload)
+        assert processed.json()["status"] == "pending_review"
+
+        response = await client.get("/context", params={"query": "Dashboard Analytics"})
+
+        assert response.json()["results"] == []
 
 
 class TestReviewEndpoint:
     @pytest.mark.asyncio
     async def test_review_queue_empty(self, client):
-        response = await client.get(
-            "/review/queue",
-            params={"tenant_id": TEST_TENANT_ID},
-        )
+        response = await client.get("/review/queue")
 
         assert response.status_code == 200
         data = response.json()
@@ -163,7 +164,6 @@ class TestReviewEndpoint:
     async def test_approve_nonexistent_article(self, client):
         response = await client.post(
             "/review/nonexistent-id/approve",
-            params={"tenant_id": TEST_TENANT_ID},
             json={"reviewer_id": "reviewer-1"},
         )
 

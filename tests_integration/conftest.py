@@ -67,6 +67,7 @@ async def tenant():
         await session.run("MATCH (n {tenant_id: $t}) DETACH DELETE n", t=tenant_id)
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM audit_logs WHERE tenant_id = $1", UUID(tenant_id))
+        await conn.execute("DELETE FROM api_keys WHERE tenant_id = $1", UUID(tenant_id))
         await conn.execute("DELETE FROM tenants WHERE id = $1", UUID(tenant_id))
 
 
@@ -85,17 +86,21 @@ def threshold():
     settings.CONFIDENCE_THRESHOLD = original
 
 
-def auth_headers(tenant_id: str) -> dict[str, str]:
-    """Headers that identify a caller. Replaced by API-key headers once authentication lands."""
-    return {}
+@pytest_asyncio.fixture
+async def api_key(tenant):
+    """A real API key, stored hashed in Postgres, with every scope but admin."""
+    from core.auth import create_api_key
+
+    created = await create_api_key(UUID(tenant), "integration test", ["read", "write", "review"])
+    return created.key
 
 
 @pytest_asyncio.fixture
-async def client(tenant):
+async def client(tenant, api_key):
     from httpx import ASGITransport, AsyncClient
 
     from api.main import app
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers(tenant)) as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers={"X-API-Key": api_key}) as c:
         yield c

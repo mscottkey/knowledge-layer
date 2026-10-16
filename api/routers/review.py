@@ -1,9 +1,10 @@
 from typing import Any
-from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from api.deps import ReviewAuth
+from core.auth import AuthContext
 from models.articles import Article, ArticleStatus
 from graph import queries
 from pipeline.embedder import embed
@@ -36,12 +37,13 @@ class ReviewQueueResponse(BaseModel):
 
 class EditRequest(BaseModel):
     edited_body: str
-    reviewer_id: str
+    # Development only. With an API key, the reviewer is the key, so this cannot be spoofed.
+    reviewer_id: str | None = None
     note: str | None = None
 
 
 class ReviewRequest(BaseModel):
-    reviewer_id: str
+    reviewer_id: str | None = None
     note: str | None = None
 
 
@@ -50,6 +52,26 @@ class ReviewResponse(BaseModel):
     status: str
     event_id: str
     previous_article_id: str | None = None
+
+
+def _reviewer(auth: AuthContext, claimed: str | None) -> str:
+    """Who gets credited with a review. A real credential outranks anything in the request body."""
+    if auth.user_id or auth.api_key_id:
+        return auth.actor
+    return claimed or auth.actor
+
+
+async def _audit(auth: AuthContext, action: str, article_id: str, **details: Any) -> None:
+    await log_audit(
+        tenant_id=auth.tenant_id,
+        action=action,
+        actor_id=auth.user_id,
+        actor_type="api_key" if auth.api_key_id else "user",
+        api_key_id=auth.api_key_id,
+        table_name="articles",
+        record_id=article_id,
+        new_values=details or None,
+    )
 
 
 async def _load(article_id: str, tenant_id: str, allowed: set[str]) -> dict[str, Any]:
@@ -65,9 +87,8 @@ async def _load(article_id: str, tenant_id: str, allowed: set[str]) -> dict[str,
 
 
 @router.get("/queue", response_model=ReviewQueueResponse)
-async def get_review_queue(
-    tenant_id: str = Query(..., min_length=1),
-) -> ReviewQueueResponse:
+async def get_review_queue(auth: ReviewAuth) -> ReviewQueueResponse:
+    tenant_id = str(auth.tenant_id)
     articles = await queries.get_pending_review_articles(tenant_id)
 
     items = [
@@ -94,22 +115,25 @@ async def get_review_queue(
 async def approve_article(
     article_id: str,
     request: ReviewRequest,
-    tenant_id: str = Query(..., min_length=1),
+    auth: ReviewAuth,
 ) -> ReviewResponse:
+    tenant_id = str(auth.tenant_id)
+    reviewer = _reviewer(auth, request.reviewer_id)
     await _load(article_id, tenant_id, REVIEWABLE)
 
     event_id = await queries.create_review_event_node(
         tenant_id=tenant_id,
         article_id=article_id,
-        reviewer_id=request.reviewer_id,
+        reviewer_id=reviewer,
         action="approved",
         note=request.note,
     )
     await publish_article(article_id, tenant_id)
+    await _audit(auth, "article.approve", article_id, reviewer=reviewer)
 
     logger.info(
         "Article approved",
-        extra={"article_id": article_id, "reviewer_id": request.reviewer_id},
+        extra={"article_id": article_id, "reviewer_id": reviewer},
     )
 
     return ReviewResponse(
@@ -123,22 +147,25 @@ async def approve_article(
 async def reject_article(
     article_id: str,
     request: ReviewRequest,
-    tenant_id: str = Query(..., min_length=1),
+    auth: ReviewAuth,
 ) -> ReviewResponse:
+    tenant_id = str(auth.tenant_id)
+    reviewer = _reviewer(auth, request.reviewer_id)
     await _load(article_id, tenant_id, RETRACTABLE)
 
     event_id = await queries.create_review_event_node(
         tenant_id=tenant_id,
         article_id=article_id,
-        reviewer_id=request.reviewer_id,
+        reviewer_id=reviewer,
         action="rejected",
         note=request.note,
     )
     await queries.update_article_status(article_id, ArticleStatus.draft.value, tenant_id)
+    await _audit(auth, "article.reject", article_id, reviewer=reviewer)
 
     logger.info(
         "Article rejected",
-        extra={"article_id": article_id, "reviewer_id": request.reviewer_id},
+        extra={"article_id": article_id, "reviewer_id": reviewer},
     )
 
     return ReviewResponse(
@@ -152,12 +179,14 @@ async def reject_article(
 async def edit_article(
     article_id: str,
     request: EditRequest,
-    tenant_id: str = Query(..., min_length=1),
+    auth: ReviewAuth,
 ) -> ReviewResponse:
     """
     Publish the reviewer's text as a new version. The version being edited is kept as history,
     so the original synthesized text and the human change are both on record.
     """
+    tenant_id = str(auth.tenant_id)
+    reviewer = _reviewer(auth, request.reviewer_id)
     original = await _load(article_id, tenant_id, REVIEWABLE)
 
     edited = Article(
@@ -176,13 +205,13 @@ async def edit_article(
     event_id = await queries.create_review_event_node(
         tenant_id=tenant_id,
         article_id=new_id,
-        reviewer_id=request.reviewer_id,
+        reviewer_id=reviewer,
         action="edited",
         edited_body=request.edited_body,
         note=request.note,
     )
 
-    tenant_uuid = UUID(tenant_id)
+    tenant_uuid = auth.tenant_id
     embedding = await embed(request.edited_body, tenant_id=tenant_uuid)
     await upsert_embedding(
         article_id=new_id,
@@ -192,17 +221,11 @@ async def edit_article(
     )
     await publish_article(new_id, tenant_id)
 
-    await log_audit(
-        tenant_id=tenant_uuid,
-        action="article.edit",
-        table_name="articles",
-        record_id=new_id,
-        new_values={"previous_article_id": article_id, "version": edited.version},
-    )
+    await _audit(auth, "article.edit", new_id, previous_article_id=article_id, version=edited.version)
 
     logger.info(
         "Article edited",
-        extra={"article_id": new_id, "previous_article_id": article_id, "reviewer_id": request.reviewer_id},
+        extra={"article_id": new_id, "previous_article_id": article_id, "reviewer_id": reviewer},
     )
 
     return ReviewResponse(

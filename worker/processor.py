@@ -36,6 +36,8 @@ class ProcessResult:
     entities: list[str]
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # True when the signal matched existing knowledge closely enough to add nothing.
+    duplicate: bool = False
 
 
 class SignalProcessor:
@@ -86,6 +88,7 @@ class SignalProcessor:
                 confidence=0.0,
                 conflict_detected=False,
                 entities=[],
+                duplicate=True,
             )
 
         # Detect conflicts

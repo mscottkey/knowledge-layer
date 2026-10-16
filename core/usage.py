@@ -1,3 +1,4 @@
+import json
 from uuid import UUID
 
 from core.supabase import get_supabase_pool, get_mock_pool
@@ -6,17 +7,28 @@ from core.logging import get_logger
 
 logger = get_logger("core.usage")
 
-# Cost per 1M tokens in microdollars (1 dollar = 1,000,000 microdollars)
-MODEL_COSTS = {
+# List prices in US dollars per 1M tokens. These change often, so check them against the
+# provider's pricing page before relying on the totals, or override them with MODEL_PRICES_JSON,
+# for example '{"gemini-2.5-flash": {"input": 0.30, "output": 2.50}}'.
+MODEL_PRICES_USD_PER_1M: dict[str, dict[str, float]] = {
     # Gemini
-    "text-embedding-004": {"input": 25, "output": 0},  # $0.000025/1K tokens
-    "gemini-2.5-flash": {"input": 75, "output": 300},  # $0.075/$0.30 per 1M (free tier available)
-    "gemini-2.0-flash": {"input": 75, "output": 300},
+    "text-embedding-004": {"input": 0.025, "output": 0.0},
+    "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
+    "gemini-2.0-flash": {"input": 0.075, "output": 0.30},
     # OpenAI
-    "gpt-4o": {"input": 2500, "output": 10000},  # $2.50/$10 per 1M
-    "gpt-4o-mini": {"input": 150, "output": 600},
-    "text-embedding-3-large": {"input": 130, "output": 0},
+    "gpt-4o": {"input": 2.50, "output": 10.00},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "text-embedding-3-large": {"input": 0.13, "output": 0.0},
 }
+
+_warned_models: set[str] = set()
+
+
+def _prices() -> dict[str, dict[str, float]]:
+    overrides = get_settings().MODEL_PRICES_JSON
+    if not overrides:
+        return MODEL_PRICES_USD_PER_1M
+    return {**MODEL_PRICES_USD_PER_1M, **json.loads(overrides)}
 
 
 def calculate_cost_microdollars(
@@ -24,13 +36,20 @@ def calculate_cost_microdollars(
     prompt_tokens: int,
     completion_tokens: int,
 ) -> int:
-    """Calculate cost in microdollars (1/1,000,000 of a dollar)."""
-    costs = MODEL_COSTS.get(model_name, {"input": 0, "output": 0})
+    """
+    Cost in microdollars (1/1,000,000 of a dollar).
 
-    input_cost = (prompt_tokens / 1_000_000) * costs["input"] * 1_000_000
-    output_cost = (completion_tokens / 1_000_000) * costs["output"] * 1_000_000
+    A price in dollars per million tokens is numerically the same as microdollars per token,
+    so the cost is simply tokens times price.
+    """
+    prices = _prices().get(model_name)
+    if prices is None:
+        if model_name not in _warned_models:
+            _warned_models.add(model_name)
+            logger.warning(f"No price for model {model_name}; its usage will be logged at zero cost")
+        return 0
 
-    return int(input_cost + output_cost)
+    return round(prompt_tokens * prices["input"] + completion_tokens * prices["output"])
 
 
 async def log_ai_usage(

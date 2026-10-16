@@ -157,7 +157,7 @@ async def copy_entity_links(from_article_id: str, to_article_id: str, tenant_id:
 async def get_article_history(article_id: str, tenant_id: str) -> list[dict[str, Any]]:
     query = """
     MATCH (a:Article {id: $article_id, tenant_id: $tenant_id})
-    OPTIONAL MATCH path = (a)-[:SUPERSEDES*]->(prev:Article)
+    OPTIONAL MATCH path = (a)-[:SUPERSEDES*]->(prev:Article {tenant_id: $tenant_id})
     WITH a, prev, path
     ORDER BY prev.version DESC
     RETURN a.id AS id, a.title AS title, a.version AS version, a.status AS status,
@@ -327,7 +327,7 @@ async def get_signal_count_for_entity(tenant_id: str, entity_name: str, days: in
         return 0
 
     query = """
-    MATCH (s:Signal {tenant_id: $tenant_id})-[:CONTRIBUTED_TO]->(a:Article)-[:COVERS]->(e:Entity {name: $entity_name, tenant_id: $tenant_id})
+    MATCH (s:Signal {tenant_id: $tenant_id})-[:CONTRIBUTED_TO]->(a:Article {tenant_id: $tenant_id})-[:COVERS]->(e:Entity {name: $entity_name, tenant_id: $tenant_id})
     WHERE datetime(s.ingested_at) > datetime() - duration({days: $days})
     RETURN count(DISTINCT s) AS count
     """
