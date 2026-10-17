@@ -165,6 +165,25 @@ The reviewer recorded in the audit log is the API key's name, not anything in th
   The old version retires only when the replacement is published, so retrieval never has a gap.
 - Editing creates a new version; versions are immutable.
 
+## Review console
+
+`web/` is a Next.js app for the people who review what the system is unsure about.
+
+- **Review queue:** each waiting article shows why it is there, a word-level diff against the live
+  version it would replace, and the signals it was built from. Approve, edit first, or reject.
+- **What agents get:** ask a question the way an agent would and see only published articles. Approve
+  something in the queue and ask again to see it appear.
+
+```bash
+cd web && npm install
+npm run dev                     # sample data in the browser, no backend needed
+NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev   # against a real API, paste a review-scope key
+```
+
+Without `NEXT_PUBLIC_API_URL` it runs the same lifecycle rules on invented sample data for a fictional
+product, which is what a deployed demo should use. To deploy it on Vercel, set the root directory to
+`web` and leave the variable unset.
+
 ## Running Tests
 
 ```bash

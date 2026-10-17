@@ -1,9 +1,10 @@
 import type { Metadata } from 'next'
 import './globals.css'
+import Shell from '@/components/Shell'
 
 export const metadata: Metadata = {
   title: 'KnowledgeLayer',
-  description: 'AI-native knowledge graph platform',
+  description: 'A reviewed knowledge base for AI support agents',
 }
 
 export default function RootLayout({
@@ -13,7 +14,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="min-h-screen bg-gray-50">{children}</body>
+      <body className="min-h-screen bg-slate-50 text-slate-900">
+        <Shell>{children}</Shell>
+      </body>
     </html>
   )
 }
