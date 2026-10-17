@@ -423,6 +423,61 @@ async def get_pending_review_articles(tenant_id: str) -> list[dict[str, Any]]:
     return await execute_query(query, {"tenant_id": tenant_id}, tenant_id)
 
 
+async def get_review_context(article_ids: list[str], tenant_id: str) -> dict[str, dict[str, Any]]:
+    """
+    What a reviewer needs to judge each article: the version it would replace and the signals
+    it was built from. Returns {article_id: {"replaces": article | None, "sources": [signal]}}.
+    """
+    context: dict[str, dict[str, Any]] = {a: {"replaces": None, "sources": []} for a in article_ids}
+    if not article_ids:
+        return context
+
+    settings = get_settings()
+
+    if settings.mock_stores:
+        driver = get_mock_driver()
+        if driver:
+            for rel in driver.relationships:
+                if rel.get("type") == "SUPERSEDES" and rel.get("from") in context:
+                    old = driver.articles.get(rel["to"])
+                    if old and old.get("tenant_id") == tenant_id:
+                        context[rel["from"]]["replaces"] = old
+                if rel.get("type") == "CONTRIBUTED_TO" and rel.get("to") in context:
+                    signal = driver.signals.get(rel["from"])
+                    if signal and signal.get("tenant_id") == tenant_id:
+                        context[rel["to"]]["sources"].append({**signal, "weight": rel.get("weight")})
+        return context
+
+    replaced = await execute_query(
+        """
+        MATCH (a:Article {tenant_id: $tenant_id})-[:SUPERSEDES]->(old:Article {tenant_id: $tenant_id})
+        WHERE a.id IN $article_ids
+        RETURN a.id AS article_id, old.id AS id, old.title AS title, old.body AS body,
+               old.version AS version, old.status AS status, old.confidence AS confidence
+        """,
+        {"article_ids": article_ids, "tenant_id": tenant_id},
+        tenant_id,
+    )
+    for row in replaced:
+        context[row["article_id"]]["replaces"] = {k: v for k, v in row.items() if k != "article_id"}
+
+    sources = await execute_query(
+        """
+        MATCH (s:Signal {tenant_id: $tenant_id})-[c:CONTRIBUTED_TO]->(a:Article {tenant_id: $tenant_id})
+        WHERE a.id IN $article_ids
+        RETURN a.id AS article_id, s.id AS id, s.source AS source, s.source_id AS source_id,
+               s.raw_text AS raw_text, s.authority AS authority, s.ingested_at AS ingested_at,
+               c.weight AS weight
+        ORDER BY s.ingested_at DESC
+        """,
+        {"article_ids": article_ids, "tenant_id": tenant_id},
+        tenant_id,
+    )
+    for row in sources:
+        context[row["article_id"]]["sources"].append({k: v for k, v in row.items() if k != "article_id"})
+    return context
+
+
 async def update_article_status(article_id: str, status: str, tenant_id: str) -> None:
     settings = get_settings()
 

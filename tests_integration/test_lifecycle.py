@@ -190,3 +190,29 @@ async def test_entities_on_an_article_are_the_ids_the_graph_holds(client, tenant
         id=second["article_id"],
     )
     assert rows and all(r["exists"] for r in rows)
+
+
+async def test_the_review_queue_shows_the_version_being_replaced_and_its_sources(client, tenant, threshold):
+    threshold(0.0)
+    live = await ingest(client, tenant, ORIGINAL, "d1")
+    threshold(0.99)
+    replacement = await ingest(client, tenant, CONFLICTING, "d2")
+
+    items = (await client.get("/review/queue")).json()["items"]
+    assert [i["article_id"] for i in items] == [replacement["article_id"]]
+    item = items[0]
+    assert item["reason"] == "conflict"
+    assert item["replaces"]["article_id"] == live["article_id"]
+    assert item["replaces"]["body"]
+    assert [s["source_id"] for s in item["sources"]] == ["d2"]
+    assert "no longer shows" in item["sources"][0]["excerpt"]
+
+
+async def test_a_new_low_confidence_article_has_sources_but_nothing_to_replace(client, tenant, threshold):
+    threshold(0.99)
+    await ingest(client, tenant, ORIGINAL, "d1")
+
+    item = (await client.get("/review/queue")).json()["items"][0]
+    assert item["reason"] == "low_confidence"
+    assert item["replaces"] is None
+    assert len(item["sources"]) == 1
