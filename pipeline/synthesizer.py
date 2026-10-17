@@ -66,7 +66,7 @@ class Synthesizer:
             except (ValueError, TypeError):
                 effective_tenant_id = None
 
-        if settings.use_mocks:
+        if settings.mock_models:
             result = self._mock_synthesize(signal, existing_article)
 
             # Log mock usage

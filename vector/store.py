@@ -24,7 +24,7 @@ async def upsert_embedding(
     # Normalize tenant_id to string for mock, UUID for real
     tenant_id_str = str(tenant_id)
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         store = get_mock_store()
         if store:
             store.embeddings[article_id] = {
@@ -72,7 +72,7 @@ async def search_similar(
 
     tenant_id_str = str(tenant_id)
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         store = get_mock_store()
         if store:
             return _mock_search(store, embedding, tenant_id_str, limit)
@@ -148,7 +148,7 @@ async def get_all_embeddings(tenant_id: UUID | str) -> list[dict[str, Any]]:
 
     tenant_id_str = str(tenant_id)
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         store = get_mock_store()
         if store:
             return [
@@ -196,7 +196,7 @@ async def delete_embedding(article_id: str, tenant_id: UUID | str) -> bool:
 
     tenant_id_str = str(tenant_id)
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         store = get_mock_store()
         if store and article_id in store.embeddings:
             if store.embeddings[article_id]["tenant_id"] == tenant_id_str:

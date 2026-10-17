@@ -19,7 +19,7 @@ INDEXES = [
 async def ensure_schema() -> None:
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         logger.info("Skipping schema creation for mock driver")
         return
 

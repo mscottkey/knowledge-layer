@@ -1,3 +1,4 @@
+import json
 from typing import Any
 from uuid import UUID
 
@@ -6,6 +7,11 @@ from core.config import get_settings
 from core.logging import get_logger
 
 logger = get_logger("core.audit")
+
+
+def _json(value: dict | None) -> str | None:
+    """asyncpg sends JSONB parameters as text, so encode dicts ourselves."""
+    return None if value is None else json.dumps(value, default=str)
 
 
 async def log_audit(
@@ -28,7 +34,7 @@ async def log_audit(
     """Log an audit event to Supabase."""
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         mock_pool = get_mock_pool()
         if mock_pool:
             from uuid import uuid4
@@ -53,7 +59,7 @@ async def log_audit(
                 action, table_name, record_id, status,
                 old_values, new_values, failure_reason,
                 ip_address, user_agent, request_id, contains_pii
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15)
             RETURNING id
             """,
             tenant_id,
@@ -64,8 +70,8 @@ async def log_audit(
             table_name,
             record_id,
             status,
-            old_values,
-            new_values,
+            _json(old_values),
+            _json(new_values),
             failure_reason,
             ip_address,
             user_agent,
@@ -89,7 +95,7 @@ async def log_security_event(
     """Log a security event to Supabase."""
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         logger.warning(
             f"Security event: {event_type}",
             extra={"severity": severity, "description": description}
@@ -104,7 +110,7 @@ async def log_security_event(
             INSERT INTO security_events (
                 tenant_id, user_id, event_type, severity, description,
                 ip_address, user_agent, metadata, auto_action
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
             RETURNING id
             """,
             tenant_id,
@@ -114,7 +120,7 @@ async def log_security_event(
             description,
             ip_address,
             user_agent,
-            metadata or {},
+            _json(metadata or {}),
             auto_action,
         )
         return row["id"] if row else None

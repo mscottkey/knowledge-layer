@@ -1,35 +1,21 @@
-import json
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
-from pydantic import BaseModel
-import redis.asyncio as redis
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
+from api.deps import WriteAuth
 from models.signals import KnowledgeSignal, SourceType, SOURCE_AUTHORITY
-from worker.processor import SignalProcessor, ProcessResult
-from core.config import get_settings
+from worker import queue
+from worker.processor import SignalProcessor
 from core.logging import get_logger
 
 logger = get_logger("api.ingest")
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
-_redis_client: redis.Redis | None = None
-_mock_queue: dict[str, dict] = {}
-
-
-async def get_redis() -> redis.Redis | None:
-    global _redis_client
-    settings = get_settings()
-
-    if settings.use_mocks:
-        return None
-
-    if _redis_client is None:
-        _redis_client = redis.from_url(settings.REDIS_URL)
-
-    return _redis_client
+# Every signal costs an embedding and a synthesis call, so refuse oversized payloads up front.
+MAX_SIGNAL_CHARS = 50_000
 
 
 class IngestResponse(BaseModel):
@@ -39,6 +25,7 @@ class IngestResponse(BaseModel):
 
 class ProcessResponse(BaseModel):
     article_id: str
+    # "published", "pending_review", or "duplicate" when the signal added nothing new.
     status: str
     confidence: float
     conflict_detected: bool
@@ -46,14 +33,16 @@ class ProcessResponse(BaseModel):
 
 
 class DirectSignalRequest(BaseModel):
-    tenant_id: str
     source_id: str
-    raw_text: str
+    raw_text: str = Field(max_length=MAX_SIGNAL_CHARS)
+    source: SourceType = SourceType.doc
     metadata: dict[str, Any] | None = None
+    # Accepted for backwards compatibility. The tenant comes from the API key, and a different
+    # one here is refused.
+    tenant_id: str | None = None
 
 
-def map_ticket_payload(payload: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
-    tenant_id = payload.get("tenant_id", payload.get("account_id", "default"))
+def map_ticket_payload(payload: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
     source_id = str(payload.get("ticket_id", payload.get("id", uuid4())))
 
     description = payload.get("description", "")
@@ -72,11 +61,10 @@ def map_ticket_payload(payload: dict[str, Any]) -> tuple[str, str, str, dict[str
         "tags": payload.get("tags", []),
     }
 
-    return tenant_id, source_id, raw_text, metadata
+    return source_id, raw_text, metadata
 
 
-def map_slack_payload(payload: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
-    tenant_id = payload.get("tenant_id", payload.get("team_id", "default"))
+def map_slack_payload(payload: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
 
     event = payload.get("event", payload)
     source_id = event.get("ts", str(uuid4()))
@@ -88,11 +76,10 @@ def map_slack_payload(payload: dict[str, Any]) -> tuple[str, str, str, dict[str,
         "thread_ts": event.get("thread_ts"),
     }
 
-    return tenant_id, source_id, raw_text, metadata
+    return source_id, raw_text, metadata
 
 
-def map_pr_payload(payload: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
-    tenant_id = payload.get("tenant_id", "default")
+def map_pr_payload(payload: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
 
     pr = payload.get("pull_request", payload)
     source_id = str(pr.get("number", pr.get("id", uuid4())))
@@ -107,11 +94,10 @@ def map_pr_payload(payload: dict[str, Any]) -> tuple[str, str, str, dict[str, An
         "author": pr.get("user", {}).get("login"),
     }
 
-    return tenant_id, source_id, raw_text, metadata
+    return source_id, raw_text, metadata
 
 
-def map_doc_payload(payload: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
-    tenant_id = payload.get("tenant_id", "default")
+def map_doc_payload(payload: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
     source_id = payload.get("doc_id", payload.get("id", str(uuid4())))
     raw_text = payload.get("content", payload.get("body", ""))
 
@@ -121,11 +107,10 @@ def map_doc_payload(payload: dict[str, Any]) -> tuple[str, str, str, dict[str, A
         "author": payload.get("author"),
     }
 
-    return tenant_id, source_id, raw_text, metadata
+    return source_id, raw_text, metadata
 
 
-def map_call_payload(payload: dict[str, Any]) -> tuple[str, str, str, dict[str, Any]]:
-    tenant_id = payload.get("tenant_id", "default")
+def map_call_payload(payload: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
     source_id = payload.get("call_id", str(uuid4()))
     raw_text = payload.get("transcript", payload.get("summary", ""))
 
@@ -135,7 +120,7 @@ def map_call_payload(payload: dict[str, Any]) -> tuple[str, str, str, dict[str, 
         "date": payload.get("date"),
     }
 
-    return tenant_id, source_id, raw_text, metadata
+    return source_id, raw_text, metadata
 
 
 SOURCE_MAPPERS = {
@@ -151,67 +136,66 @@ SOURCE_MAPPERS = {
 async def ingest_signal(
     source_type: SourceType,
     payload: dict[str, Any],
+    auth: WriteAuth,
 ) -> IngestResponse:
     mapper = SOURCE_MAPPERS.get(source_type)
     if not mapper:
         raise HTTPException(status_code=400, detail=f"Unknown source type: {source_type}")
 
-    tenant_id, source_id, raw_text, metadata = mapper(payload)
+    source_id, raw_text, metadata = mapper(payload)
 
     if not raw_text:
         raise HTTPException(status_code=400, detail="No text content found in payload")
+    if len(raw_text) > MAX_SIGNAL_CHARS:
+        raise HTTPException(status_code=413, detail=f"Signal text is over {MAX_SIGNAL_CHARS} characters")
 
     signal = KnowledgeSignal.from_source(
-        tenant_id=tenant_id,
+        tenant_id=str(auth.tenant_id),
         source=source_type,
         source_id=source_id,
         raw_text=raw_text,
         metadata=metadata,
     )
-
-    settings = get_settings()
-
-    if settings.use_mocks:
-        _mock_queue[str(signal.id)] = signal.model_dump(mode="json")
-    else:
-        redis_client = await get_redis()
-        if redis_client:
-            await redis_client.lpush(
-                "knowledgelayer:signals",
-                json.dumps(signal.model_dump(mode="json")),
-            )
+    await queue.enqueue(signal)
 
     logger.info(
         "Signal enqueued",
-        extra={"signal_id": str(signal.id), "source": source_type.value},
+        extra={"signal_id": str(signal.id), "source": source_type.value, "tenant_id": signal.tenant_id},
     )
 
-    return IngestResponse(
-        signal_id=str(signal.id),
-        status="queued",
-    )
+    return IngestResponse(signal_id=str(signal.id), status="queued")
 
 
 @router.post("/process/{signal_id}", response_model=ProcessResponse)
 async def process_signal_sync(
     signal_id: str,
     request: DirectSignalRequest,
+    auth: WriteAuth,
 ) -> ProcessResponse:
+    """Run the pipeline on the supplied text now, without the queue. For development and testing."""
+    if request.tenant_id is not None and request.tenant_id != str(auth.tenant_id):
+        raise HTTPException(status_code=403, detail="tenant_id does not match the API key's tenant")
+
+    try:
+        signal_uuid = UUID(signal_id)
+    except ValueError:
+        signal_uuid = uuid4()
+
     signal = KnowledgeSignal(
-        tenant_id=request.tenant_id,
-        source=SourceType.doc,
-        source_id=signal_id,
+        id=signal_uuid,
+        tenant_id=str(auth.tenant_id),
+        source=request.source,
+        source_id=request.source_id,
         raw_text=request.raw_text,
-        authority=SOURCE_AUTHORITY[SourceType.doc],
+        authority=SOURCE_AUTHORITY[request.source],
         metadata=request.metadata or {},
     )
 
-    processor = SignalProcessor()
-    result = await processor.process(signal)
+    result = await SignalProcessor().process(signal, user_id=auth.user_id)
 
     return ProcessResponse(
         article_id=result.article_id,
-        status=result.status.value,
+        status="duplicate" if result.duplicate else result.status.value,
         confidence=result.confidence,
         conflict_detected=result.conflict_detected,
         entities=result.entities,

@@ -49,7 +49,7 @@ async def embed(
     """Generate embedding for text, with optional usage logging."""
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_models:
         text_h = _text_hash(text)
         embedding = list(_cached_mock_embedding(text_h, settings.EMBEDDING_DIMENSION))
 
@@ -102,7 +102,7 @@ async def embed_batch(
     """Generate embeddings for multiple texts."""
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_models:
         embeddings = []
         for text in texts:
             text_h = _text_hash(text)

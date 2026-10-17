@@ -158,7 +158,7 @@ def extract_entities_keyword(text: str, tenant_id: str) -> list[Entity]:
 def extract_entities(text: str, tenant_id: str) -> list[Entity]:
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_models:
         return extract_entities_keyword(text, tenant_id)
 
     return extract_entities_spacy(text, tenant_id)

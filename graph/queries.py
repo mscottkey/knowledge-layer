@@ -1,4 +1,5 @@
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Sequence
 
 from graph.client import execute_query, get_mock_driver
 from models.articles import Article
@@ -24,7 +25,7 @@ async def find_articles_for_entity(tenant_id: str, entity_name: str) -> list[dic
 async def create_article_node(article: Article) -> str:
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         driver = get_mock_driver()
         if driver:
             driver.articles[str(article.id)] = article.to_neo4j_props()
@@ -50,13 +51,13 @@ async def create_article_node(article: Article) -> str:
     return result[0]["id"] if result else str(article.id)
 
 
-async def supersede_article(old_id: str, new_id: str, diff_summary: str, tenant_id: str) -> None:
+async def link_supersedes(new_id: str, old_id: str, diff_summary: str, tenant_id: str) -> None:
+    """Record that `new_id` is a newer version of `old_id`. Does not change either article's status."""
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         driver = get_mock_driver()
-        if driver and old_id in driver.articles:
-            driver.articles[old_id]["status"] = "superseded"
+        if driver:
             driver.relationships.append({
                 "type": "SUPERSEDES",
                 "from": new_id,
@@ -68,8 +69,8 @@ async def supersede_article(old_id: str, new_id: str, diff_summary: str, tenant_
     query = """
     MATCH (old:Article {id: $old_id, tenant_id: $tenant_id})
     MATCH (new:Article {id: $new_id, tenant_id: $tenant_id})
-    SET old.status = 'superseded'
-    CREATE (new)-[:SUPERSEDES {diff_summary: $diff_summary}]->(old)
+    MERGE (new)-[r:SUPERSEDES]->(old)
+    SET r.diff_summary = $diff_summary
     """
     await execute_query(
         query,
@@ -78,10 +79,85 @@ async def supersede_article(old_id: str, new_id: str, diff_summary: str, tenant_
     )
 
 
+async def supersede_replaced_versions(article_id: str, tenant_id: str) -> list[str]:
+    """
+    Retire every older version that `article_id` replaces. Call this when the new version is
+    published, so the knowledge base never has a gap while a replacement waits for review.
+    Returns the ids that were retired.
+    """
+    settings = get_settings()
+
+    if settings.mock_stores:
+        driver = get_mock_driver()
+        retired: list[str] = []
+        if driver:
+            frontier = [article_id]
+            seen: set[str] = set()
+            while frontier:
+                current = frontier.pop()
+                for rel in driver.relationships:
+                    if rel["type"] == "SUPERSEDES" and rel["from"] == current and rel["to"] not in seen:
+                        seen.add(rel["to"])
+                        frontier.append(rel["to"])
+                        old = driver.articles.get(rel["to"])
+                        if old and old.get("tenant_id") == tenant_id and old.get("status") in ("published", "pending_review"):
+                            old["status"] = "superseded"
+                            retired.append(rel["to"])
+        return retired
+
+    query = """
+    MATCH (new:Article {id: $article_id, tenant_id: $tenant_id})-[:SUPERSEDES*1..]->(old:Article {tenant_id: $tenant_id})
+    WHERE old.status IN ['published', 'pending_review']
+    WITH DISTINCT old
+    SET old.status = 'superseded', old.updated_at = $now
+    RETURN old.id AS id
+    """
+    rows = await execute_query(
+        query,
+        {"article_id": article_id, "tenant_id": tenant_id, "now": datetime.now(timezone.utc).isoformat()},
+        tenant_id,
+    )
+    return [r["id"] for r in rows]
+
+
+async def supersede_article(old_id: str, new_id: str, diff_summary: str, tenant_id: str) -> None:
+    """Link the versions and retire the old one immediately. Prefer link_supersedes plus publish."""
+    await link_supersedes(new_id, old_id, diff_summary, tenant_id)
+    await supersede_replaced_versions(new_id, tenant_id)
+
+
+async def copy_entity_links(from_article_id: str, to_article_id: str, tenant_id: str) -> None:
+    """Make `to_article_id` cover the same entities as `from_article_id`."""
+    settings = get_settings()
+
+    if settings.mock_stores:
+        driver = get_mock_driver()
+        if driver:
+            for rel in list(driver.relationships):
+                if rel["type"] == "COVERS" and rel["from"] == from_article_id:
+                    driver.relationships.append({"type": "COVERS", "from": to_article_id, "to": rel["to"]})
+            source = driver.articles.get(from_article_id)
+            target = driver.articles.get(to_article_id)
+            if source and target:
+                target["entity_ids"] = list(source.get("entity_ids", []))
+        return
+
+    query = """
+    MATCH (src:Article {id: $from_id, tenant_id: $tenant_id})-[:COVERS]->(e:Entity {tenant_id: $tenant_id})
+    MATCH (dst:Article {id: $to_id, tenant_id: $tenant_id})
+    MERGE (dst)-[:COVERS]->(e)
+    """
+    await execute_query(
+        query,
+        {"from_id": from_article_id, "to_id": to_article_id, "tenant_id": tenant_id},
+        tenant_id,
+    )
+
+
 async def get_article_history(article_id: str, tenant_id: str) -> list[dict[str, Any]]:
     query = """
     MATCH (a:Article {id: $article_id, tenant_id: $tenant_id})
-    OPTIONAL MATCH path = (a)-[:SUPERSEDES*]->(prev:Article)
+    OPTIONAL MATCH path = (a)-[:SUPERSEDES*]->(prev:Article {tenant_id: $tenant_id})
     WITH a, prev, path
     ORDER BY prev.version DESC
     RETURN a.id AS id, a.title AS title, a.version AS version, a.status AS status,
@@ -126,7 +202,7 @@ async def find_coverage_gaps(tenant_id: str) -> list[dict[str, Any]]:
 async def create_entity_node(entity: Entity) -> str:
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         driver = get_mock_driver()
         if driver:
             driver.entities[str(entity.id)] = entity.to_neo4j_props()
@@ -146,7 +222,7 @@ async def create_entity_node(entity: Entity) -> str:
 async def link_article_to_entity(article_id: str, entity_id: str, tenant_id: str) -> None:
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         driver = get_mock_driver()
         if driver:
             driver.relationships.append({
@@ -176,7 +252,7 @@ async def link_article_to_entity(article_id: str, entity_id: str, tenant_id: str
 async def link_signal_to_article(signal_id: str, article_id: str, weight: float, tenant_id: str) -> None:
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         driver = get_mock_driver()
         if driver:
             driver.relationships.append({
@@ -202,7 +278,7 @@ async def link_signal_to_article(signal_id: str, article_id: str, weight: float,
 async def create_signal_node(signal: KnowledgeSignal) -> str:
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         driver = get_mock_driver()
         if driver:
             driver.signals[str(signal.id)] = {
@@ -244,14 +320,14 @@ async def create_signal_node(signal: KnowledgeSignal) -> str:
 async def get_signal_count_for_entity(tenant_id: str, entity_name: str, days: int = 30) -> int:
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         driver = get_mock_driver()
         if driver:
             return len(driver.signals)
         return 0
 
     query = """
-    MATCH (s:Signal {tenant_id: $tenant_id})-[:CONTRIBUTED_TO]->(a:Article)-[:COVERS]->(e:Entity {name: $entity_name, tenant_id: $tenant_id})
+    MATCH (s:Signal {tenant_id: $tenant_id})-[:CONTRIBUTED_TO]->(a:Article {tenant_id: $tenant_id})-[:COVERS]->(e:Entity {name: $entity_name, tenant_id: $tenant_id})
     WHERE datetime(s.ingested_at) > datetime() - duration({days: $days})
     RETURN count(DISTINCT s) AS count
     """
@@ -266,7 +342,7 @@ async def get_signal_count_for_entity(tenant_id: str, entity_name: str, days: in
 async def get_article_by_id(article_id: str, tenant_id: str) -> dict[str, Any] | None:
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         driver = get_mock_driver()
         if driver and article_id in driver.articles:
             article = driver.articles[article_id]
@@ -288,31 +364,40 @@ async def get_article_by_id(article_id: str, tenant_id: str) -> dict[str, Any] |
     return result[0] if result else None
 
 
-async def get_articles_by_ids(article_ids: list[str], tenant_id: str) -> list[dict[str, Any]]:
+async def get_articles_by_ids(
+    article_ids: list[str],
+    tenant_id: str,
+    statuses: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch articles by id. Pass `statuses` to restrict the result, for example ["published"]."""
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         driver = get_mock_driver()
         if driver:
             results = []
             for aid in article_ids:
                 if aid in driver.articles:
                     article = driver.articles[aid]
-                    if article.get("tenant_id") == tenant_id:
-                        results.append(article)
+                    if article.get("tenant_id") != tenant_id:
+                        continue
+                    if statuses is not None and article.get("status") not in statuses:
+                        continue
+                    results.append(article)
             return results
         return []
 
     query = """
     MATCH (a:Article)
     WHERE a.id IN $article_ids AND a.tenant_id = $tenant_id
+      AND ($statuses IS NULL OR a.status IN $statuses)
     RETURN a.id AS id, a.tenant_id AS tenant_id, a.title AS title, a.body AS body,
            a.version AS version, a.status AS status, a.confidence AS confidence,
            a.entity_ids AS entity_ids, a.created_at AS created_at, a.updated_at AS updated_at
     """
     return await execute_query(
         query,
-        {"article_ids": article_ids, "tenant_id": tenant_id},
+        {"article_ids": article_ids, "tenant_id": tenant_id, "statuses": list(statuses) if statuses is not None else None},
         tenant_id,
     )
 
@@ -320,7 +405,7 @@ async def get_articles_by_ids(article_ids: list[str], tenant_id: str) -> list[di
 async def get_pending_review_articles(tenant_id: str) -> list[dict[str, Any]]:
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         driver = get_mock_driver()
         if driver:
             return [
@@ -341,7 +426,7 @@ async def get_pending_review_articles(tenant_id: str) -> list[dict[str, Any]]:
 async def update_article_status(article_id: str, status: str, tenant_id: str) -> None:
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         driver = get_mock_driver()
         if driver and article_id in driver.articles:
             driver.articles[article_id]["status"] = status
@@ -349,11 +434,11 @@ async def update_article_status(article_id: str, status: str, tenant_id: str) ->
 
     query = """
     MATCH (a:Article {id: $article_id, tenant_id: $tenant_id})
-    SET a.status = $status, a.updated_at = datetime()
+    SET a.status = $status, a.updated_at = $now
     """
     await execute_query(
         query,
-        {"article_id": article_id, "status": status, "tenant_id": tenant_id},
+        {"article_id": article_id, "status": status, "tenant_id": tenant_id, "now": datetime.now(timezone.utc).isoformat()},
         tenant_id,
     )
 
@@ -367,15 +452,15 @@ async def create_review_event_node(
     note: str | None = None,
 ) -> str:
     from uuid import uuid4
-    from datetime import datetime, timezone
 
     event_id = str(uuid4())
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         return event_id
 
     query = """
+    MATCH (a:Article {id: $article_id, tenant_id: $tenant_id})
     CREATE (r:ReviewEvent {
         id: $id,
         tenant_id: $tenant_id,
@@ -385,9 +470,7 @@ async def create_review_event_node(
         edited_body: $edited_body,
         note: $note,
         created_at: $created_at
-    })
-    MATCH (a:Article {id: $article_id, tenant_id: $tenant_id})
-    CREATE (r)-[:REVIEWS]->(a)
+    })-[:REVIEWS]->(a)
     RETURN r.id AS id
     """
     result = await execute_query(
@@ -404,18 +487,20 @@ async def create_review_event_node(
         },
         tenant_id,
     )
-    return result[0]["id"] if result else event_id
+    if not result:
+        raise LookupError(f"Article {article_id} not found for tenant {tenant_id}")
+    return result[0]["id"]
 
 
 async def has_prior_approval(article_id: str, tenant_id: str) -> bool:
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         return False
 
     query = """
-    MATCH (a:Article {id: $article_id, tenant_id: $tenant_id})<-[:SUPERSEDES*0..]-(prev:Article)
-    MATCH (r:ReviewEvent {action: 'approved'})-[:REVIEWS]->(prev)
+    MATCH (a:Article {id: $article_id, tenant_id: $tenant_id})-[:SUPERSEDES*0..]->(prev:Article {tenant_id: $tenant_id})
+    MATCH (r:ReviewEvent {action: 'approved', tenant_id: $tenant_id})-[:REVIEWS]->(prev)
     RETURN count(r) > 0 AS has_approval
     """
     result = await execute_query(

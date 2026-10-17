@@ -12,6 +12,7 @@ packages = [
     { include = "pipeline" },
     { include = "vector" },
     { include = "worker" },
+    { include = "scripts" },
     { include = "tests" },
 ]
 

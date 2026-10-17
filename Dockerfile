@@ -25,9 +25,10 @@ COPY models/ ./models/
 COPY pipeline/ ./pipeline/
 COPY vector/ ./vector/
 COPY worker/ ./worker/
+COPY scripts/ ./scripts/
 
 # Expose port
 EXPOSE 8000
 
-# Run the application
+# Run the API. The worker runs from the same image: python -m worker.consumer
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

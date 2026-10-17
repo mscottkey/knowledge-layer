@@ -31,7 +31,7 @@ async def get_supabase_pool() -> asyncpg.Pool | MockSupabasePool:
     global _pool, _mock_pool
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         if _mock_pool is None:
             logger.info("Using mock Supabase pool")
             _mock_pool = MockSupabasePool()
@@ -68,7 +68,7 @@ async def execute_query(
     """Execute a query against Supabase."""
     settings = get_settings()
 
-    if settings.use_mocks:
+    if settings.mock_stores:
         return None
 
     pool = await get_supabase_pool()

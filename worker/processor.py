@@ -12,6 +12,7 @@ from pipeline.scorer import ConfidenceScorer
 from pipeline.synthesizer import Synthesizer
 from graph import queries
 from vector.store import upsert_embedding, get_all_embeddings
+from worker.lifecycle import publish_article
 from core.config import get_settings
 from core.logging import get_logger
 from core.audit import log_audit
@@ -35,6 +36,8 @@ class ProcessResult:
     entities: list[str]
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # True when the signal matched existing knowledge closely enough to add nothing.
+    duplicate: bool = False
 
 
 class SignalProcessor:
@@ -85,6 +88,7 @@ class SignalProcessor:
                 confidence=0.0,
                 conflict_detected=False,
                 entities=[],
+                duplicate=True,
             )
 
         # Detect conflicts
@@ -137,6 +141,9 @@ class SignalProcessor:
         if existing_article:
             version = existing_article.version + 1
 
+        # Entities are merged by name, so use the ids the graph actually holds.
+        entity_ids = [await queries.create_entity_node(entity) for entity in entities]
+
         article = Article(
             tenant_id=signal.tenant_id,
             title=synthesis_result.title,
@@ -144,26 +151,26 @@ class SignalProcessor:
             version=version,
             status=status,
             confidence=confidence,
-            entity_ids=[str(e.id) for e in entities],
+            entity_ids=entity_ids,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
 
-        # Write to Neo4j
+        # Write to Neo4j. The new version records what it replaces, but the old version stays
+        # live until the new one is published.
         article_id = await queries.create_article_node(article)
 
         if existing_article:
-            await queries.supersede_article(
-                str(existing_article.id),
+            await queries.link_supersedes(
                 article_id,
+                str(existing_article.id),
                 synthesis_result.diff_summary,
                 signal.tenant_id,
             )
 
         await queries.create_signal_node(signal)
 
-        for entity in entities:
-            entity_id = await queries.create_entity_node(entity)
+        for entity_id in entity_ids:
             await queries.link_article_to_entity(article_id, entity_id, signal.tenant_id)
 
         await queries.link_signal_to_article(
@@ -189,6 +196,10 @@ class SignalProcessor:
                 "version": article.version,
             },
         )
+
+        # Publish last, once the new version is retrievable, so there is no gap in coverage.
+        if status == ArticleStatus.published:
+            await publish_article(article_id, signal.tenant_id)
 
         # Audit log
         await log_audit(
