@@ -11,6 +11,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!web/lib/
 lib64/
 parts/
 sdist/
@@ -54,3 +55,7 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Next.js build output
+web/tsconfig.tsbuildinfo
+web/next-env.d.ts

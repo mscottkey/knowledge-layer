@@ -22,6 +22,22 @@ REVIEWABLE = {ArticleStatus.pending_review.value, ArticleStatus.draft.value}
 RETRACTABLE = REVIEWABLE | {ArticleStatus.published.value}
 
 
+class SourceSignal(BaseModel):
+    source: str
+    source_id: str
+    excerpt: str
+    authority: float
+    ingested_at: str
+
+
+class ReplacedArticle(BaseModel):
+    article_id: str
+    title: str
+    body: str
+    version: int
+    confidence: float
+
+
 class ReviewQueueItem(BaseModel):
     article_id: str
     title: str
@@ -29,6 +45,10 @@ class ReviewQueueItem(BaseModel):
     version: int
     confidence: float
     created_at: str
+    # Why it is here: it would replace a published article, or it just scored below the threshold.
+    reason: str = "low_confidence"
+    replaces: ReplacedArticle | None = None
+    sources: list[SourceSignal] = []
 
 
 class ReviewQueueResponse(BaseModel):
@@ -91,17 +111,42 @@ async def get_review_queue(auth: ReviewAuth) -> ReviewQueueResponse:
     tenant_id = str(auth.tenant_id)
     articles = await queries.get_pending_review_articles(tenant_id)
 
-    items = [
-        ReviewQueueItem(
-            article_id=a["id"],
-            title=a.get("title", ""),
-            body=a.get("body", ""),
-            version=a.get("version", 1),
-            confidence=a.get("confidence", 0.0),
-            created_at=a.get("created_at", ""),
+    context = await queries.get_review_context([a["id"] for a in articles], tenant_id)
+
+    items = []
+    for a in articles:
+        extra = context.get(a["id"], {})
+        old = extra.get("replaces")
+        items.append(
+            ReviewQueueItem(
+                article_id=a["id"],
+                title=a.get("title", ""),
+                body=a.get("body", ""),
+                version=a.get("version", 1),
+                confidence=a.get("confidence", 0.0),
+                created_at=a.get("created_at", ""),
+                reason="conflict" if old and old.get("status") == ArticleStatus.published.value else "low_confidence",
+                replaces=ReplacedArticle(
+                    article_id=old["id"],
+                    title=old.get("title", ""),
+                    body=old.get("body", ""),
+                    version=old.get("version", 1),
+                    confidence=old.get("confidence") or 0.0,
+                )
+                if old
+                else None,
+                sources=[
+                    SourceSignal(
+                        source=s.get("source", ""),
+                        source_id=s.get("source_id", ""),
+                        excerpt=(s.get("raw_text") or "")[:400],
+                        authority=s.get("authority") or 0.0,
+                        ingested_at=s.get("ingested_at", ""),
+                    )
+                    for s in extra.get("sources", [])
+                ],
+            )
         )
-        for a in articles
-    ]
 
     logger.info(
         "Review queue fetched",

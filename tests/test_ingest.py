@@ -168,3 +168,18 @@ class TestReviewEndpoint:
         )
 
         assert response.status_code == 404
+
+
+class TestReviewQueueContext:
+    async def test_the_queue_says_why_an_article_is_waiting_and_what_it_was_built_from(self, client, low_threshold):
+        low_threshold.CONFIDENCE_THRESHOLD = 0.99
+        await client.post(
+            "/ingest/process/s1",
+            json={"source_id": "d1", "raw_text": "The Dashboard feature shows Analytics reports"},
+            headers={"X-Tenant-ID": TEST_TENANT_ID},
+        )
+        items = (await client.get("/review/queue", headers={"X-Tenant-ID": TEST_TENANT_ID})).json()["items"]
+        assert len(items) == 1
+        assert items[0]["reason"] == "low_confidence"
+        assert items[0]["replaces"] is None
+        assert [s["source_id"] for s in items[0]["sources"]] == ["d1"]
